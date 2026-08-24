@@ -6,10 +6,13 @@ Maps semantic camera names to hardware serial numbers, camera types, and roles.
 
     {
         "scene_1":       {"serial": 37038161,       "type": "zed",        "role": "scene"},
-        "scene_2":       {"serial": 55667788,       "type": "zed",        "role": "scene"},
-        "left_wrist":    {"serial": "123456789012", "type": "realsense",  "role": "left_wrist"},
+        "scene_2":       {"serial": "55667788",     "type": "realsense",  "role": "scene", "width": 640, "height": 360},
+        "left_wrist":    {"serial": "123456789012", "type": "realsense",  "role": "left_wrist", "width": 640, "height": 480},
         "right_wrist":   {"serial": 14932342,       "type": "zed",        "role": "right_wrist"}
     }
+
+RealSense ``width`` and ``height`` default to 640×480 when omitted and apply
+to both the RGB and depth streams.
 
 Roles
 -----
@@ -208,7 +211,15 @@ class CameraConfig:
         if cam_type == "realsense":
             from raiden.cameras.realsense import RealSenseCamera
 
-            return RealSenseCamera(name, str(serial), fps=fps)
+            width = int(entry.get("width", 640)) if isinstance(entry, dict) else 640
+            height = int(entry.get("height", 480)) if isinstance(entry, dict) else 480
+            return RealSenseCamera(
+                name,
+                str(serial),
+                fps=fps,
+                width=width,
+                height=height,
+            )
 
         raise ValueError(
             f"Unknown camera type '{cam_type}' for camera '{name}'. "

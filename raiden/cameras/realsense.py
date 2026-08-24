@@ -70,18 +70,27 @@ class RealSenseCamera(Camera):
     _COLOR_W, _COLOR_H = 640, 480
     _DEPTH_W, _DEPTH_H = 640, 480
 
-    def __init__(self, camera_name: str, serial_number: str, fps: int = 30):
+    def __init__(
+        self,
+        camera_name: str,
+        serial_number: str,
+        fps: int = 30,
+        width: int = _COLOR_W,
+        height: int = _COLOR_H,
+    ):
         self._name = camera_name
         self._serial = serial_number
         self._fps = fps
+        self._stream_w = width
+        self._stream_h = height
         self._pipeline: Optional[rs.pipeline] = None
         self._config: Optional[rs.config] = None
         self._profile: Optional[rs.pipeline_profile] = None
         self._depth_scale: float = 0.001  # metres per raw unit (D405 default)
         self._latest_frames = None
         # Actual negotiated color resolution (set after pipeline.start()).
-        self._color_w: int = self._COLOR_W
-        self._color_h: int = self._COLOR_H
+        self._color_w: int = width
+        self._color_h: int = height
         # Offset (ns) to convert RS SDK timestamps to wall-clock:
         # wall_ns = frame.get_timestamp() * 1_000_000 + _clock_offset_ns
         # Measured once at start_recording() by comparing the first frame
@@ -123,10 +132,18 @@ class RealSenseCamera(Camera):
         cfg = rs.config()
         cfg.enable_device(self._serial)
         cfg.enable_stream(
-            rs.stream.color, self._COLOR_W, self._COLOR_H, rs.format.bgr8, self._fps
+            rs.stream.color,
+            self._stream_w,
+            self._stream_h,
+            rs.format.bgr8,
+            self._fps,
         )
         cfg.enable_stream(
-            rs.stream.depth, self._DEPTH_W, self._DEPTH_H, rs.format.z16, self._fps
+            rs.stream.depth,
+            self._stream_w,
+            self._stream_h,
+            rs.format.z16,
+            self._fps,
         )
         self._start_pipeline(cfg)
         print(
@@ -152,10 +169,18 @@ class RealSenseCamera(Camera):
         cfg = rs.config()
         cfg.enable_device(self._serial)
         cfg.enable_stream(
-            rs.stream.color, self._COLOR_W, self._COLOR_H, rs.format.bgr8, self._fps
+            rs.stream.color,
+            self._stream_w,
+            self._stream_h,
+            rs.format.bgr8,
+            self._fps,
         )
         cfg.enable_stream(
-            rs.stream.depth, self._DEPTH_W, self._DEPTH_H, rs.format.z16, self._fps
+            rs.stream.depth,
+            self._stream_w,
+            self._stream_h,
+            rs.format.z16,
+            self._fps,
         )
         cfg.enable_record_to_file(str(path))
         self._start_pipeline(cfg)
@@ -201,7 +226,11 @@ class RealSenseCamera(Camera):
             rs.stream.color, self._color_w, self._color_h, rs.format.bgr8, self._fps
         )
         cfg.enable_stream(
-            rs.stream.depth, self._DEPTH_W, self._DEPTH_H, rs.format.z16, self._fps
+            rs.stream.depth,
+            self._stream_w,
+            self._stream_h,
+            rs.format.z16,
+            self._fps,
         )
         self._config = cfg
         self._profile = self._pipeline.start(cfg)

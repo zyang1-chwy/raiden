@@ -531,7 +531,11 @@ class RobotController:
             self.kd_gains["follower_l"] = FOLLOWER_KD.copy()
         # The teaching-handle leader arm is lighter than the follower (no heavy
         # gripper), so the default gravity_comp_factor=1.3 over-compensates.
-        _LEADER_GRAVITY_COMP_FACTOR = 1.1
+        _LEADER_GRAVITY_COMP_FACTOR = np.array(
+            [1.10, 1.10, 0.98, 1.18, 0.98, 0.98],
+            dtype=np.float64,
+        )
+
 
         if self.use_right_leader:
             leader_r_base = results["right leader"]
