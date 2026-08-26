@@ -57,6 +57,10 @@ from raiden.camera_config import CameraConfig
 _SEQUENCE_NAME = "0000"
 _IMG_EXT = ".png"
 
+# Unix timestamp for 2020-01-01 in nanoseconds — anything below this is
+# almost certainly a hardware-relative counter, not wall-clock.
+_WALL_CLOCK_MIN_NS = 1_577_836_800_000_000_000
+
 # Cameras whose images are physically mounted upside-down and need a 180° correction.
 _FLIP_CAMERAS = {"right_wrist_camera"}
 
@@ -519,6 +523,65 @@ def _apply_camera_trim(
             str(seq_dir / "rgb" / name / "timestamps.npy"),
             ts[start_idx:end_idx],
         )
+
+
+def _trim_cameras_to_episode_end(
+    seq_dir: Path,
+    cam_timestamps: Dict[str, Optional[np.ndarray]],
+    frame_counts: Dict[str, int],
+    episode_end_ns: Optional[int],
+) -> Tuple[Dict[str, Optional[np.ndarray]], Dict[str, int]]:
+    """Drop camera frames captured after the episode ended.
+
+    ``episode_end_ns`` (metadata.json) is the wall-clock time of the last robot
+    sample — i.e. the instant the stop button was pressed.  The RealSense
+    recorder keeps writing to the .bag until its pipeline is stopped, which
+    happens after the robot shutdown, so every episode overruns by a few
+    seconds of the arms parking.  Those frames would otherwise survive
+    conversion carrying the last robot pose repeated, since np.interp clamps
+    at the edges.
+
+    Deletes the trailing frame files so a re-run does not recount them.
+    """
+    if episode_end_ns is None:
+        return cam_timestamps, frame_counts
+
+    new_ts = dict(cam_timestamps)
+    new_counts = dict(frame_counts)
+
+    for name, ts in cam_timestamps.items():
+        if ts is None or len(ts) == 0 or int(ts[0]) <= _WALL_CLOCK_MIN_NS:
+            continue
+
+        n_total = frame_counts.get(name, len(ts))
+        end_idx = int(np.searchsorted(ts, int(episode_end_ns), side="right"))
+        if end_idx >= n_total:
+            continue
+        if end_idx == 0:
+            print(
+                f"  Warning: {name} has no frames before episode_end_ns — "
+                "leaving it untrimmed (check the clock offset)."
+            )
+            continue
+
+        rgb_dir = seq_dir / "rgb" / name
+        depth_dir = seq_dir / "depth" / name
+        for i in range(end_idx, n_total):
+            for d, ext in ((rgb_dir, _IMG_EXT), (depth_dir, ".npz")):
+                f = d / f"{i:010d}{ext}"
+                if f.exists():
+                    f.unlink()
+
+        dropped = n_total - end_idx
+        new_ts[name] = ts[:end_idx]
+        new_counts[name] = end_idx
+        np.save(str(rgb_dir / "timestamps.npy"), ts[:end_idx])
+        print(
+            f"  Trimmed {name}: dropped {dropped} frame(s) after episode end "
+            f"(~{dropped / 30:.2f}s)"
+        )
+
+    return new_ts, new_counts
 
 
 # ---------------------------------------------------------------------------
@@ -1148,6 +1211,15 @@ def convert_recording(
         cam_timestamps,
         frame_counts,
         camera_start_times_ns=rec_meta.get("camera_start_times_ns"),
+    )
+
+    # Drop frames captured after the stop button was pressed (the RealSense
+    # writer overruns the episode — see _trim_cameras_to_episode_end).
+    cam_timestamps, frame_counts = _trim_cameras_to_episode_end(
+        seq_dir,
+        cam_timestamps,
+        frame_counts,
+        rec_meta.get("episode_end_ns"),
     )
 
     # Trim all cameras to the same (minimum) frame count.
