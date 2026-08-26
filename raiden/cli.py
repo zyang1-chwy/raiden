@@ -342,6 +342,69 @@ class ShardifyCommand:
 
 
 @dataclass
+class ExportLeRobotCommand:
+    """Export raw recordings directly to a LeRobot v3.0 dataset"""
+
+    data_dir: str = "data"
+    """Root data directory (default: ./data); reads raw recordings from <data_dir>/raw/"""
+
+    task: Optional[str] = None
+    """Comma-separated task name(s) to export, e.g. stand or stand,pour.
+    Omit to pick interactively with fzf (default: None)"""
+
+    episodes: Optional[str] = None
+    """Comma-separated episode directory names within each task, e.g. 0000,0003
+    (a bare 3 also matches 0003). Omit to export every episode (default: None)"""
+
+    output_dir: str = "data/lerobot"
+    """Output directory for the LeRobot dataset (default: data/lerobot)"""
+
+    repo_id: Optional[str] = None
+    """Dataset repo id, e.g. myuser/yam_pick (default: raiden/<task_name>)"""
+
+    robot_type: str = "yam"
+    """robot_type recorded in meta/info.json (default: yam)"""
+
+    fps: int = 30
+    """Frame rate recorded in meta/info.json (default: 30)"""
+
+    depth_cameras: str = "scene_camera"
+    """Comma-separated cameras to emit depth video for; "none" disables depth entirely
+    (default: scene_camera — wrist depth roughly triples dataset size)"""
+
+    rgb_codec: str = "libsvtav1"
+    """RGB video codec: libsvtav1 (default) or libx264"""
+
+    rgb_crf: int = 30
+    """RGB quality; lower is better and larger (default: 30)"""
+
+    rgb_gop: int = 2
+    """RGB keyframe interval. LeRobot's default of 2 favours random-frame seek;
+    raising it to 30 cuts RGB size roughly 5x (default: 2)"""
+
+    depth_lossless: bool = True
+    """Encode depth losslessly (default: True). Lossy depth smears object edges badly"""
+
+    depth_crf: Optional[int] = None
+    """Depth quality when --no-depth-lossless is set (default: None)"""
+
+    resize: Optional[str] = None
+    """Resize frames to HxW before encoding, e.g. 256x256 (default: native)"""
+
+    keyframe_count: int = 1
+    """Leading frames per episode also archived losslessly (RGB PNG + uint16 depth PNG
+    + intrinsics/extrinsics JSON) under meta/keyframes/, for pose estimation.
+    Always native resolution. 0 disables (default: 1)"""
+
+    max_episodes: int = -1
+    """Limit the number of NEW episodes exported per task (default: -1 = all)"""
+
+    reexport: bool = False
+    """Rebuild each dataset from scratch instead of appending only new recordings
+    (default: False — re-running skips recordings already exported)"""
+
+
+@dataclass
 class ServeCommand:
     """Start the chiral policy server"""
 
@@ -413,6 +476,9 @@ def _print_help() -> None:
     )
     print(
         "  shardify                    Export converted episodes to WebDataset shards"
+    )
+    print(
+        "  export_lerobot              Export raw recordings directly to a LeRobot v3.0 dataset"
     )
     print("  console                     Open the interactive metadata console (TUI)")
     print("  reset_can                   Reset CAN interfaces (bring down then up)")
@@ -648,6 +714,58 @@ def main():
                     s3_bucket=command.s3_bucket,
                     s3_prefix=s3_full_prefix,
                 )
+
+        elif subcommand == "export_lerobot":
+            sys.argv.pop(1)
+            command = tyro.cli(
+                ExportLeRobotCommand,
+                description="Export raw recordings directly to a LeRobot v3.0 dataset",
+            )
+            from pathlib import Path as _Path
+
+            from raiden.lerobot_export import (
+                LeRobotExportConfig,
+                resolve_raw_recordings,
+                run_lerobot_export,
+            )
+
+            def _split(value):
+                return [p.strip() for p in value.split(",") if p.strip()] if value else None
+
+            selected = resolve_raw_recordings(
+                command.data_dir, _split(command.task), _split(command.episodes)
+            )
+
+            depth_cams: tuple = ()
+            if command.depth_cameras.strip().lower() not in ("none", ""):
+                depth_cams = tuple(
+                    c.strip() for c in command.depth_cameras.split(",") if c.strip()
+                )
+
+            resize = None
+            if command.resize:
+                h, w = command.resize.split("x")
+                resize = (int(h), int(w))
+
+            for task_dir, recording_dirs in selected:
+                print(f"Found {len(recording_dirs)} recording(s) in {task_dir}")
+                cfg = LeRobotExportConfig(
+                    output_dir=_Path(command.output_dir) / task_dir.name,
+                    repo_id=command.repo_id or f"raiden/{task_dir.name}",
+                    robot_type=command.robot_type,
+                    fps=command.fps,
+                    depth_cameras=depth_cams,
+                    rgb_vcodec=command.rgb_codec,
+                    rgb_crf=command.rgb_crf,
+                    rgb_gop=command.rgb_gop,
+                    depth_lossless=command.depth_lossless,
+                    depth_crf=command.depth_crf,
+                    resize=resize,
+                    keyframe_count=command.keyframe_count,
+                    max_episodes=command.max_episodes,
+                    incremental=not command.reexport,
+                )
+                run_lerobot_export(recording_dirs, cfg)
 
         elif subcommand == "console":
             sys.argv.pop(1)

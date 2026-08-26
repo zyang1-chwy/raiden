@@ -35,6 +35,7 @@ See the **[Installation guide](https://tri-ml.github.io/raiden/guide/installatio
 | `rd console` | Browse and correct demonstration metadata in a terminal UI |
 | `rd convert` | Convert successful recordings to a structured dataset |
 | `rd shardify` | Export converted episodes to WebDataset shards |
+| `rd export_lerobot` | Export raw recordings directly to a LeRobot v3.0 dataset |
 | `rd visualize` | Visualize a converted recording with Rerun |
 | `rd serve` | Start the policy server for live inference |
 | `rd make_ffs_onnx` | Export Fast Foundation Stereo model to ONNX / TensorRT engines |
@@ -47,7 +48,6 @@ Run `rd <command> --help` for all options.
 The following features are coming soon:
 
 - **Policy training and inference** — built-in integration for policy training pipelines and closed-loop inference.
-- **LeRobot format converter** — export converted episodes to the [LeRobot](https://github.com/huggingface/lerobot) dataset format for compatibility with the Hugging Face ecosystem.
 - **Initial scene condition management** — set up and save named initial scene conditions in the console to enable reproducible, side-by-side comparison of multiple policies under identical starting states.
 
 ## Disclaimer

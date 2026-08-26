@@ -60,9 +60,10 @@ nav:
     - "6. Recording": guide/recording.md
     - "7. Conversion": guide/conversion.md
     - "8. Shardify": guide/shardify.md
-    - "9. Evaluation": guide/serve.md
-    - "10. Replay": guide/replay.md
-    - "11. Visualization": guide/visualization.md
+    - "9. LeRobot export": guide/lerobot.md
+    - "10. Evaluation": guide/serve.md
+    - "11. Replay": guide/replay.md
+    - "12. Visualization": guide/visualization.md
     - Safety: guide/safety.md
     - FAQ: guide/faq.md
   - API Reference:

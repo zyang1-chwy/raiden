@@ -32,6 +32,7 @@ dependencies = [
   "onnxscript>=0.6.2",
   "chiral",
   "pyyaml>=6.0.3",
+  "av>=12",  # LeRobot v3.0 video encoding (rd export_lerobot)
 ]
 
 [project.optional-dependencies]

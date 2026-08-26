@@ -34,6 +34,9 @@ Key features:
 - **Policy-ready output** - converts recordings to a simple, flat file format
   with synchronized frames, per-frame extrinsics, and interpolated joint poses,
   ready to plug into policy training frameworks.
+- **[LeRobot export](guide/lerobot.md)** - export raw recordings straight to a
+  LeRobot v3.0 dataset (parquet + mp4), roughly 50x smaller than the intermediate
+  frame layer and without writing it at all.
 - **[Fin-ray gripper support](guide/hardware.md#fin-ray-gripper)** - 3D-printable
   compliant grippers that conform to object shapes for robust and gentle grasping.
 
@@ -87,7 +90,6 @@ be mixed freely within the same session.
 The following features are coming soon:
 
 - **Policy training and inference** — built-in integration for policy training pipelines and closed-loop inference.
-- **LeRobot format converter** — export converted episodes to the [LeRobot](https://github.com/huggingface/lerobot) dataset format for compatibility with the Hugging Face ecosystem.
 - **Initial scene condition management** — set up and save named initial scene conditions in the console to enable reproducible, side-by-side comparison of multiple policies under identical starting states.
 
 ## Acknowledgments
