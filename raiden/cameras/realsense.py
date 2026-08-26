@@ -57,6 +57,11 @@ import pyrealsense2 as rs
 from .base import Camera, CameraFrame
 
 
+# Unix timestamp for 2020-01-01 in nanoseconds.  A RealSense timestamp below
+# this is a device-relative counter (ms since boot), not host wall-clock.
+_WALL_CLOCK_MIN_NS = 1_577_836_800_000_000_000
+
+
 def _enable_global_time(device: rs.device) -> None:
     """Enable global timestamp on all sensors that support it."""
     for sensor in device.query_sensors():
@@ -197,11 +202,15 @@ class RealSenseCamera(Camera):
         ``_clock_offset_ns`` is the additive correction such that:
             wall_ns = int(frame.get_timestamp() * 1_000_000) + _clock_offset_ns
 
-        This works whether or not global_time_enabled is supported by the
-        device: if it is supported the stored timestamps are already wall-clock
-        and the offset will be ~0; if not, the offset captures the difference
-        between the RealSense hardware clock and the system clock at the
-        moment recording begins, which is stable enough over a 10-60 s episode.
+        Only applies when global_time_enabled is NOT in effect.  When it is, the
+        SDK already reports host-domain timestamps and no correction is needed —
+        measuring one anyway captures the pipeline delay (~19 ms here) rather
+        than a clock difference, and applying it shifts every camera timestamp
+        against the robot log.
+
+        The two cases are far apart and easy to tell apart: a device-relative
+        timestamp is milliseconds since boot, so it lands decades below the Unix
+        epoch, while a host-domain one is a real wall-clock value.
         """
         try:
             frames = self._pipeline.wait_for_frames(timeout_ms=2000)
@@ -209,7 +218,12 @@ class RealSenseCamera(Camera):
             color_frame = frames.get_color_frame()
             if color_frame:
                 rs_ns = int(color_frame.get_timestamp() * 1_000_000)
-                self._clock_offset_ns = wall_ns - rs_ns
+                if rs_ns > _WALL_CLOCK_MIN_NS:
+                    # Already host-domain — any difference here is pipeline
+                    # delay, not clock skew.  Correcting for it would be wrong.
+                    self._clock_offset_ns = None
+                else:
+                    self._clock_offset_ns = wall_ns - rs_ns
         except Exception:
             self._clock_offset_ns = None
 
@@ -256,18 +270,18 @@ class RealSenseCamera(Camera):
             return False
 
     def get_current_timestamp_ns(self) -> int:
-        """Return the capture timestamp of the most recently grabbed frame.
+        """Current host time in nanoseconds — see ``Camera.get_current_timestamp_ns``.
 
-        With global_time_enabled the RealSense SDK stamps frames with system
-        wall-clock time, so this is on the same clock as time.time_ns() and
-        can be used directly to align robot data with camera frames.
+        This must return the clock *now*, not a frame timestamp.  It previously
+        returned the capture time of the last grabbed frame, which put the
+        ~100 Hz robot log on the 30 Hz camera frame grid (samples sharing a
+        timestamp) and labelled every sample ~34 ms in the past — one pipeline
+        delay plus up to a frame of grab staleness.
+
+        With ``global_time_enabled`` the SDK already maps frame timestamps into
+        the host clock domain, so ``time.time_ns()`` is that same clock and the
+        two remain directly comparable.
         """
-        if self._latest_frames is not None:
-            frame = self._latest_frames.get_color_frame()
-            if frame:
-                return int(frame.get_timestamp() * 1_000_000)
-        import time
-
         return time.time_ns()
 
     def get_frame(self) -> CameraFrame:

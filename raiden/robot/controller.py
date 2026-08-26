@@ -56,11 +56,22 @@ __all__ = [
     "smooth_move_joints",
     "FOLLOWER_HOME_POS",
     "LEADER_HOME_POS",
+    "PARK_FOLLOWER_POS",
+    "PARK_LEADER_POS",
 ]
 
 # Default home positions
-FOLLOWER_HOME_POS = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0])  # 6 joints + gripper
-LEADER_HOME_POS = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0])  # 6 joints only
+# FOLLOWER_HOME_POS = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0])  # 6 joints + gripper
+# LEADER_HOME_POS = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0])  # 6 joints only
+
+FOLLOWER_HOME_POS = np.array([0.0, 1.25, 1.40, -1.2, 0, 0, 1.0])  # 6 joints + gripper
+LEADER_HOME_POS = np.array([0.0, 1.25, 1.40, -1.2, 0, 0])  # 6 joints only
+
+# Park pose used at the END of an episode, immediately before close().
+# Motors go limp on disconnect, so this must be a pose the arms can rest in
+# under gravity — all-zeros folds each arm down onto its own base.
+PARK_FOLLOWER_POS = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0])  # 6 joints + gripper
+PARK_LEADER_POS = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0])  # 6 joints only
 
 # Follower PD gains — explicitly defined so recording, replay, and serving all
 # use identical control parameters regardless of i2rt defaults.
@@ -532,7 +543,7 @@ class RobotController:
         # The teaching-handle leader arm is lighter than the follower (no heavy
         # gripper), so the default gravity_comp_factor=1.3 over-compensates.
         _LEADER_GRAVITY_COMP_FACTOR = np.array(
-            [1.10, 1.10, 0.98, 1.18, 0.98, 0.98],
+            [1.10, 1.10, 0.98, 1.3, 0.98, 0.98],
             dtype=np.float64,
         )
 
@@ -670,6 +681,49 @@ class RobotController:
 
         print("✓ All arms at home positions")
 
+    def move_to_park_positions(self, simultaneous: bool = True) -> None:
+        """Move all arms to the park pose used just before ``close()``.
+
+        Motors go limp the moment the CAN connection drops, so the arms must
+        be disconnected in a pose they can rest in unpowered.  This is a
+        larger, slower move than the per-episode home because it folds the
+        arms down from the upright home pose.
+        """
+        print("\nParking arms for safe disconnect...")
+
+        def park(robot, target_pos, name):
+            print(f"  - Parking {name}...")
+            smooth_move_joints(robot, target_pos, time_interval_s=3.0, steps=200)
+            print(f"  - {name} parked")
+
+        arms = [
+            (self.follower_r, PARK_FOLLOWER_POS, "right_follower"),
+            (self.follower_l, PARK_FOLLOWER_POS, "left_follower"),
+            (
+                self.leader_r._robot if self.leader_r else None,
+                PARK_LEADER_POS,
+                "right_leader",
+            ),
+            (
+                self.leader_l._robot if self.leader_l else None,
+                PARK_LEADER_POS,
+                "left_leader",
+            ),
+        ]
+        active = [a for a in arms if a[0] is not None]
+
+        if simultaneous:
+            threads = [threading.Thread(target=park, args=a) for a in active]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+        else:
+            for a in active:
+                park(*a)
+
+        print("✓ All arms parked")
+
     def get_all_observations(self) -> Dict[str, Dict[str, np.ndarray]]:
         """Get full observations (joint_pos, joint_vel, joint_torque) from all robots.
 
@@ -787,6 +841,30 @@ class RobotController:
             except Exception:
                 pass
         return None
+
+    def prime_verdict_buttons(self) -> None:
+        """Seed verdict edge-detection with the buttons' current state.
+
+        The button that stops a recording is also the "success" button, but the
+        two are tracked by separate records (``last_button_state`` vs
+        ``_last_verdict_state``) and the verdict record starts blank each
+        episode.  Without priming, the stop press — still down ~15 ms later
+        when the verdict prompt takes its first reading — reads as a fresh
+        success vote.  Call this immediately before the prompt so only a new
+        press counts.
+        """
+        for name, leader in [("leader_r", self.leader_r), ("leader_l", self.leader_l)]:
+            if leader is None:
+                continue
+            try:
+                _, io_inputs = leader.get_info()
+                top = float(io_inputs[0]) if len(io_inputs) > 0 else 0.0
+                bottom = float(io_inputs[1]) if len(io_inputs) > 1 else 0.0
+            except Exception:
+                # Read failed — assume pressed so a stale press cannot count.
+                top = bottom = 1.0
+            self._last_verdict_state[f"{name}_top"] = top
+            self._last_verdict_state[f"{name}_bottom"] = bottom
 
     def check_failure_button(self) -> bool:
         """Check if the failure button (encoder_obs[0].io_inputs[1]) was pressed.
@@ -935,8 +1013,55 @@ class RobotController:
                 print(f"  - Error in {side} teleoperation: {e}")
                 break
 
+    def align_followers_to_leaders(self, time_interval_s: float = 1.0) -> None:
+        """Smoothly move each follower onto its leader's current pose.
+
+        The teleop loop commands the leader pose directly at full follower kp,
+        so engaging teleop while the leader sits away from the follower is a
+        step input and the follower snaps.  Ramping first makes the engage
+        continuous regardless of how far the leader has been moved.
+        """
+        pairs = [
+            (self.leader_r, self.follower_r),
+            (self.leader_l, self.follower_l),
+        ]
+        threads = []
+        for leader, follower in pairs:
+            if leader is None or follower is None:
+                continue
+            leader_pos, _ = leader.get_info()
+            target = np.append(
+                leader_pos[:6], float(np.clip(leader_pos[6], 0.0, 1.0))
+            )
+            threads.append(
+                threading.Thread(
+                    target=smooth_move_joints,
+                    args=(follower, target),
+                    kwargs={"time_interval_s": time_interval_s, "steps": 100},
+                    daemon=True,
+                )
+            )
+
+        if not threads:
+            return
+
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
     def start_teleoperation(self):
         """Start teleoperation control loops (followers follow leaders)."""
+        # Idempotent: a second call would rebind _teleop_shutdown and orphan
+        # the running threads, leaving two writers per follower at 100 Hz.
+        if getattr(self, "_teleop_threads", None):
+            print("  - Teleoperation already active — ignoring duplicate start.")
+            return
+
+        # Ramp followers onto the leaders before the loops issue their first
+        # (unramped) command.
+        self.align_followers_to_leaders()
+
         # Create shutdown event for teleoperation
         self._teleop_shutdown = threading.Event()
         self._teleop_threads = []
@@ -1062,6 +1187,11 @@ class RobotController:
             raise RuntimeError(
                 "Call attach_spacemice() before start_spacemouse_teleop()."
             )
+
+        # Idempotent for the same reason as start_teleoperation().
+        if getattr(self, "_spacemouse_threads", None):
+            print("  - SpaceMouse teleop already active — ignoring duplicate start.")
+            return
 
         self._spacemouse_shutdown = threading.Event()
         self._spacemouse_threads: list = []
@@ -1381,20 +1511,21 @@ class RobotController:
             self.leader_l._robot.close()
 
     def return_to_home(self) -> None:
-        """Stop teleop, move to home, re-enable leader gravity comp.
+        """Stop teleop, park the arms, re-enable leader gravity comp.
 
-        Does NOT close robot connections — safe to call between recording
-        episodes when the session should continue.
+        Called by ``shutdown()`` at the end of every episode, immediately
+        before ``close()``, so it targets the park pose rather than the
+        per-episode home pose.  The next episode builds a fresh controller and
+        homes to ``FOLLOWER_HOME_POS`` via ``setup_for_teleop_recording()``.
         """
         self._estop_enabled = False
         self._session_estop_event.clear()
         print("\nStopping teleoperation...")
         self.stop_teleoperation()
 
-        print("\nMoving arms back to home positions...")
         self.disable_gravity_compensation()
-        self.move_to_home_positions(simultaneous=True)
-        print("✓ All arms returned to home")
+        self.move_to_park_positions(simultaneous=True)
+        print("✓ All arms parked")
 
         # Re-enable gravity compensation on leaders so they are ready for the
         # next episode without calling setup_for_teleop_recording() again.
@@ -1451,10 +1582,10 @@ class RobotController:
 
             time.sleep(0.01)  # 100 Hz command rate
 
-        # Step 4: Move all arms to home simultaneously
-        print("\n  Step 4: Moving all arms to home positions simultaneously...")
+        # Step 4: Park all arms simultaneously before disconnecting
+        print("\n  Step 4: Parking all arms simultaneously...")
         self.disable_gravity_compensation()
-        self.move_to_home_positions(simultaneous=True)
+        self.move_to_park_positions(simultaneous=True)
 
         # Detach footpedal before close() so that if emergency_stop() was
         # invoked from the footpedal callback thread, close() does not try to

@@ -408,7 +408,7 @@ def _run_processed_replay(
     except KeyboardInterrupt:
         print("\nReplay interrupted.")
     finally:
-        robot.move_to_home_positions()
+        robot.move_to_park_positions()
         robot.close()
 
 
@@ -556,5 +556,5 @@ def _stream_trajectories(
         print("\nReplay interrupted.")
     finally:
         if owns_robot:
-            robot.move_to_home_positions()
+            robot.move_to_park_positions()
             robot.close()

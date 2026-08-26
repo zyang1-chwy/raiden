@@ -1,6 +1,8 @@
 from raiden.robot.controller import (
     FOLLOWER_HOME_POS,
     LEADER_HOME_POS,
+    PARK_FOLLOWER_POS,
+    PARK_LEADER_POS,
     RobotController,
     YAMLeaderRobot,
     check_can_interface,
@@ -14,6 +16,8 @@ __all__ = [
     "FOLLOWER_HOME_POS",
     "FootPedal",
     "LEADER_HOME_POS",
+    "PARK_FOLLOWER_POS",
+    "PARK_LEADER_POS",
     "RobotController",
     "YAMLeaderRobot",
     "check_can_interface",

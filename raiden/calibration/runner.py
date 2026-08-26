@@ -1077,8 +1077,9 @@ class CalibrationRunner:
             print("\nCleaning up...")
 
             if self.robot_controller:
-                # Move the arms to the home positions.
-                self.robot_controller.move_to_home_positions(simultaneous=True)
+                # Park the arms — control threads stop right after, so they
+                # must end up in a pose they can rest in unpowered.
+                self.robot_controller.move_to_park_positions(simultaneous=True)
 
                 # Stop control threads without moving to home
                 # (Robots will stay in their current position - user can move them manually)

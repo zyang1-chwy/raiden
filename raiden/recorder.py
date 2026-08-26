@@ -182,10 +182,11 @@ class DemonstrationRecorder:
     def stop_recording(self, complete: bool = True) -> Path:
         """Stop the current recording episode and persist data.
 
-        Shuts down the robot controller (returns home + closes motor connections)
-        and stops camera recording, but does NOT close cameras — they stay open
-        so the next episode can start without re-initialising the camera SDK.
-        The caller is responsible for calling camera.close() at session end.
+        Stops camera recording and then shuts down the robot controller
+        (returns home + closes motor connections), but does NOT close cameras —
+        they stay open so the next episode can start without re-initialising
+        the camera SDK.  The caller is responsible for calling camera.close()
+        at session end.
 
         Args:
             complete: Set to True when the episode was cleanly stopped by the
@@ -364,6 +365,19 @@ class DemonstrationRecorder:
 
         if self._camera_start_times_ns:
             meta_dict["camera_start_times_ns"] = self._camera_start_times_ns
+
+        # Exact end of the episode, in the same wall-clock nanoseconds as the
+        # camera frame timestamps.  _robot_loop stops on _stop_event, which is
+        # set the instant the stop button is pressed, so its final sample is
+        # the cut point (within one 10 ms cycle).
+        #
+        # The RealSense recorder is attached to the pipeline and keeps writing
+        # to the .bag until stop_recording(), which runs after the robot
+        # shutdown — so the file always overruns this by a few seconds.  The
+        # converter uses this value to drop those frames.  (ZED is unaffected:
+        # its frames are written by grab(), which stops with the same event.)
+        if self._robot_frames:
+            meta_dict["episode_end_ns"] = int(self._robot_frames[-1]["t"])
 
         rs_offsets = {
             cam.name: cam._clock_offset_ns
@@ -577,6 +591,11 @@ def _wait_for_enter_or_quit(
                 ch = sys.stdin.read(1)
                 if ch.lower() == "q":
                     return True
+                if ch.lower() == "e":
+                    # Teleop is live before recording starts but the footpedal
+                    # soft e-stop is not armed yet, so 'e' is the abort here.
+                    termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+                    robot_controller.emergency_stop()
                 if ch in ("\r", "\n", " "):
                     return False
             time.sleep(0.05)
@@ -602,6 +621,11 @@ def _wait_for_verdict(
     Returns:
         "success", "failure", or None.
     """
+    # The stop press is still physically down here.  Seed the verdict
+    # edge-detector with it so it isn't read as a success vote.
+    if interface.supports_verdict_button:
+        robot_controller.prime_verdict_buttons()
+
     print("\n" + "-" * 60)
     print("  Mark this demonstration:")
     lines = []
@@ -663,6 +687,11 @@ def _wait_for_start_or_quit(
                 ch = sys.stdin.read(1)
                 if ch.lower() == "q":
                     return True
+                if ch.lower() == "e":
+                    # Teleop is live before recording starts but the footpedal
+                    # soft e-stop is not armed yet, so 'e' is the abort here.
+                    termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+                    robot_controller.emergency_stop()
             time.sleep(0.05)
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
@@ -786,6 +815,13 @@ def run_recording(
             # Setup interface (warmup IK, attach devices, etc.)
             interface.setup(robot_controller)
 
+            # Engage teleoperation *before* the READY prompt so the arms can be
+            # driven off the home pose to any desired start state.  Nothing is
+            # captured until recorder.start_recording() runs below, so this
+            # pre-roll motion never enters the demonstration.
+            interface.start(robot_controller)
+            print("\n  TELEOP LIVE — followers are tracking. Position the arms now.")
+
             # Flush stdout so any SDK log output has time to drain before
             # printing the READY banner.
             sys.stdout.flush()
@@ -800,7 +836,7 @@ def run_recording(
                 print("\n  Press button on any leader arm or left pedal to START.")
             else:
                 print("\n  Press Enter or left pedal to START recording.")
-            print("  Press 'q' to end session.\n")
+            print("  Press 'q' to end session, 'e' for emergency stop.\n")
             print("=" * 60 + "\n")
 
             if interface.waits_for_button_start:
@@ -815,6 +851,10 @@ def run_recording(
                 break
 
             # ── start episode ────────────────────────────────────────────
+            # Debounce: START and STOP are the same button, and the stop loop
+            # begins polling a few ms from here.
+            time.sleep(0.3)
+
             recording_dir = _next_recording_dir(task_dir)
             print(f"\n  Output: {recording_dir}")
 
@@ -826,7 +866,7 @@ def run_recording(
                 task_instruction=task_instruction,
                 interface=interface,
             )
-            interface.start(robot_controller)
+            # interface.start() already ran before the READY prompt.
             recorder.start_recording()
             robot_controller.enable_estop()
             interface.set_active_recording(robot_controller)
