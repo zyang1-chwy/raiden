@@ -231,7 +231,11 @@ class RaidenPolicyServer(chiral.PolicyServer):
         no_depth: bool = False,
         resize_images_size: Optional[Tuple[int, int]] = None,
         visualize: bool = False,
+        arms: str = "bimanual",
     ):
+        if arms not in ("bimanual", "single"):
+            raise ValueError(f"arms must be 'bimanual' or 'single', got {arms!r}")
+        self._arms = arms
         self._no_depth = no_depth
         self._resize = resize_images_size  # (H, W) or None
         if action_type not in ("joint", "ee_pose"):
@@ -339,10 +343,12 @@ class RaidenPolicyServer(chiral.PolicyServer):
         }
 
         # Initialize follower robots only (leaders not needed for inference).
+        # "single" means left arm only — same convention as teleop/record/replay.
+        use_right = self._arms == "bimanual"
         self._robot = RobotController(
             use_right_leader=False,
             use_left_leader=False,
-            use_right_follower=True,
+            use_right_follower=use_right,
             use_left_follower=True,
         )
         self._robot.initialize_robots()
@@ -601,7 +607,7 @@ class RaidenPolicyServer(chiral.PolicyServer):
             "action_layout": (
                 "left_xyz(3)+right_xyz(3)+left_rot6d(6)+right_rot6d(6)+left_grip(1)+right_grip(1)"
                 if self._action_type == "ee_pose"
-                else "right_joints(7)+left_joints(7)"
+                else "left_joints(7)+right_joints(7)"
             ),
             "proprio_names": list(self.proprios.keys()),
         }
@@ -1133,7 +1139,15 @@ class RaidenPolicyServer(chiral.PolicyServer):
                 if cam_type == "zed":
                     handle = self._open_zed(int(serial))
                 else:
-                    handle = self._open_realsense(str(serial))
+                    # Same defaults as CameraConfig.create_camera(), so the
+                    # server and the recorder open RealSense identically.
+                    entry = self._raiden_cam_cfg.list_cameras().get(name)
+                    is_dict = isinstance(entry, dict)
+                    handle = self._open_realsense(
+                        str(serial),
+                        width=int(entry.get("width", 640)) if is_dict else 640,
+                        height=int(entry.get("height", 480)) if is_dict else 480,
+                    )
                 self._cam_handles[name] = handle
                 if cam_type == "zed" and self._stereo_method in ("ffs", "tri_stereo"):
                     self._stereo_calib[name] = (handle["fx"], handle["baseline"])
@@ -1199,14 +1213,21 @@ class RaidenPolicyServer(chiral.PolicyServer):
             handle["baseline"] = float(abs(cal_params.get_camera_baseline()))
         return handle
 
-    def _open_realsense(self, serial: str) -> dict:
+    def _open_realsense(self, serial: str, width: int = 640, height: int = 480) -> dict:
+        """Open a RealSense at *width*×*height*.
+
+        Capture resolution comes from ``camera.json`` so the server matches what
+        the recorder captured (``raiden/cameras/realsense.py``); serving at a
+        different aspect ratio than the training data would distort the images
+        the policy sees.
+        """
         import pyrealsense2 as rs
 
         pipeline = rs.pipeline()
         cfg = rs.config()
         cfg.enable_device(serial)
-        cfg.enable_stream(rs.stream.color, 1280, 720, rs.format.bgr8, 30)
-        cfg.enable_stream(rs.stream.depth, 848, 480, rs.format.z16, 30)
+        cfg.enable_stream(rs.stream.color, width, height, rs.format.bgr8, 30)
+        cfg.enable_stream(rs.stream.depth, width, height, rs.format.z16, 30)
         profile = pipeline.start(cfg)
 
         color_stream = profile.get_stream(rs.stream.color).as_video_stream_profile()
@@ -1507,8 +1528,9 @@ def run_server(
     max_joint_delta: float = _DEFAULT_MAX_JOINT_DELTA,
     action_type: str = "ee_pose",
     no_depth: bool = False,
-    resize_images_size: Optional[Tuple[int, int]] = (384, 384),
+    resize_images_size: Optional[Tuple[int, int]] = (480, 640),  # (H, W) — 640 wide by 480 tall
     visualize: bool = False,
+    arms: str = "bimanual",
 ) -> None:
     """Start the Raiden chiral policy server."""
     from raiden._config import CALIBRATION_FILE, CAMERA_CONFIG
@@ -1527,6 +1549,7 @@ def run_server(
         no_depth=no_depth,
         resize_images_size=resize_images_size,
         visualize=visualize,
+        arms=arms,
     )
     try:
         server.run()

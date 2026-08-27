@@ -90,8 +90,9 @@ positions for 5 s, then moved to home, and the server exits.
 | `--ffs-iters` | `8` | FFS update iterations |
 | `--tri-stereo-variant` | `c64` | TRI Stereo variant: `c64` or `c32` |
 | `--max-joint-delta` | `0.2` | Safety limit in radians per step |
+| `--arms` | `bimanual` | Which follower arms to drive: `bimanual` or `single` (left arm only) |
 | `--no-depth` | `false` | Disable ZED depth sensing (skips NEURAL_LIGHT inference for faster startup and lower GPU load) |
-| `--resize-images` | `384x384` | Resize images to `HxW` before sending to the policy. Pass empty string to disable. |
+| `--resize-images` | `480x640` | Resize images to `HxW` before sending to the policy — the default is 640 wide by 480 tall. Pass empty string to disable. |
 | `--camera-config-file` | `~/.config/raiden/camera.json` | Path to camera config |
 | `--calibration-file` | `~/.config/raiden/calibration_results.json` | Path to calibration file |
 
