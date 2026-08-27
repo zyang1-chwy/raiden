@@ -403,6 +403,43 @@ class ExportLeRobotCommand:
     """Rebuild each dataset from scratch instead of appending only new recordings
     (default: False — re-running skips recordings already exported)"""
 
+    upload: bool = False
+    """Upload the dataset to the Hugging Face Hub after exporting. Only the newly
+    converted episodes are uploaded — files already on the Hub are skipped
+    (default: False)"""
+
+    upload_only: bool = False
+    """Skip exporting and just push already-converted datasets under --output-dir
+    to the Hub. Use this to upload episodes converted earlier, or once the raw
+    recordings have been deleted (default: False)"""
+
+    hf_repo_id: Optional[str] = None
+    """Hub dataset repo, e.g. myuser/yam_pick or a bare yam_pick to use your own
+    namespace (default: <your-hf-username>/<task_name>)"""
+
+    hf_private: bool = False
+    """Create the Hub dataset as private. Public is the default: the Hub grants
+    public datasets much more storage, which matters at ~1 TB scale"""
+
+    hf_license: Optional[str] = None
+    """License id written into the generated dataset card, e.g. apache-2.0
+    (default: None — left unset on the Hub)"""
+
+    hf_token: Optional[str] = None
+    """Hugging Face write token. Prefer HF_TOKEN in a .env file — this flag lands
+    in your shell history (default: None)"""
+
+    env_file: Optional[str] = None
+    """Path to the .env file holding HF_TOKEN
+    (default: ./.env, then ~/.config/raiden/.env)"""
+
+    hf_branch: Optional[str] = None
+    """Push to this branch of the Hub repo instead of main (default: None)"""
+
+    force_upload: bool = False
+    """Re-upload every file instead of diffing against the Hub first
+    (default: False)"""
+
 
 @dataclass
 class ServeCommand:
@@ -432,11 +469,14 @@ class ServeCommand:
     action_type: Literal["joint", "ee_pose"] = "ee_pose"
     """Action space: 'joint' (14-D joint positions, left then right) or 'ee_pose' (20-D EE poses, IK solved on-the-fly)"""
 
+    arms: Literal["bimanual", "single"] = "bimanual"
+    """Which follower arms to drive: both (bimanual) or left arm only (single)"""
+
     no_depth: bool = False
     """Disable depth sensing on ZED cameras (faster, no NEURAL_LIGHT inference)"""
 
-    resize_images: Optional[str] = "384x384"
-    """Resize images to HxW before sending to the policy (default: '384x384'). Pass empty string to disable."""
+    resize_images: Optional[str] = "480x640"
+    """Resize images to HxW before sending to the policy (default: '480x640', i.e. 640 wide by 480 tall). Pass empty string to disable."""
 
     visualize: bool = False
     """Stream camera images to a Rerun web viewer at 30 FPS (accessible via browser or SSH tunnel)"""
@@ -478,7 +518,7 @@ def _print_help() -> None:
         "  shardify                    Export converted episodes to WebDataset shards"
     )
     print(
-        "  export_lerobot              Export raw recordings directly to a LeRobot v3.0 dataset"
+        "  export_lerobot              Export raw recordings to a LeRobot v3.0 dataset (--upload pushes to HF Hub)"
     )
     print("  console                     Open the interactive metadata console (TUI)")
     print("  reset_can                   Reset CAN interfaces (bring down then up)")
@@ -732,9 +772,55 @@ def main():
             def _split(value):
                 return [p.strip() for p in value.split(",") if p.strip()] if value else None
 
+            uploading = command.upload or command.upload_only
+            if uploading:
+                from raiden.hf_upload import (
+                    HFUploadConfig,
+                    check_upload_credentials,
+                    find_datasets,
+                    upload_dataset,
+                )
+
+                def _upload_cfg(task_name):
+                    return HFUploadConfig(
+                        repo_id=command.hf_repo_id or task_name,
+                        private=command.hf_private,
+                        token=command.hf_token,
+                        env_file=command.env_file,
+                        branch=command.hf_branch,
+                        license=command.hf_license,
+                        force=command.force_upload,
+                    )
+
+                def _one_repo_only(n):
+                    if command.hf_repo_id and n > 1:
+                        raise SystemExit(
+                            f"--hf-repo-id names a single Hub repo but {n} datasets were "
+                            "selected; do one at a time, or drop --hf-repo-id to push "
+                            "each to <your-hf-username>/<task_name>"
+                        )
+
+            # Upload datasets exported earlier, without touching raw recordings
+            # (which may well have been deleted by now).
+            if command.upload_only:
+                roots = find_datasets(command.output_dir, _split(command.task))
+                _one_repo_only(len(roots))
+                for root in roots:
+                    check_upload_credentials(_upload_cfg(root.name))
+                for root in roots:
+                    upload_dataset(root, _upload_cfg(root.name))
+                return
+
             selected = resolve_raw_recordings(
                 command.data_dir, _split(command.task), _split(command.episodes)
             )
+
+            if uploading:
+                _one_repo_only(len(selected))
+                # Fail on a missing or read-only token now, not after an
+                # export that can take tens of minutes.
+                for task_dir, _ in selected:
+                    check_upload_credentials(_upload_cfg(task_dir.name))
 
             depth_cams: tuple = ()
             if command.depth_cameras.strip().lower() not in ("none", ""):
@@ -766,6 +852,9 @@ def main():
                     incremental=not command.reexport,
                 )
                 run_lerobot_export(recording_dirs, cfg)
+
+                if uploading:
+                    upload_dataset(cfg.output_dir, _upload_cfg(task_dir.name))
 
         elif subcommand == "console":
             sys.argv.pop(1)
@@ -853,6 +942,7 @@ def main():
                 no_depth=command.no_depth,
                 resize_images_size=resize,
                 visualize=command.visualize,
+                arms=command.arms,
             )
 
         elif subcommand == "make_ffs_onnx":

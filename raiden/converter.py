@@ -493,6 +493,34 @@ def _align_cameras_by_timestamp(
     return cam_timestamps, frame_counts
 
 
+def _delete_frames_from(seq_dir: Path, name: str, first_idx: int) -> int:
+    """Delete every rgb/depth frame file for *name* whose index is >= first_idx.
+
+    Bounded by what is actually on disk rather than by a frame count.  Each trim
+    pass lowers ``frame_counts`` while leaving the files in place, so a
+    count-bounded delete strands files at the original high indices.  Those
+    strays are then counted by the "already extracted" glob on the next
+    conversion, putting the frame count out of step with timestamps.npy — which
+    silently disqualifies the camera as the interpolation reference.
+    """
+    removed = 0
+    for d, ext in (
+        (seq_dir / "rgb" / name, _IMG_EXT),
+        (seq_dir / "depth" / name, ".npz"),
+    ):
+        if not d.is_dir():
+            continue
+        for f in d.glob(f"*{ext}"):
+            try:
+                idx = int(f.stem)
+            except ValueError:
+                continue
+            if idx >= first_idx:
+                f.unlink()
+                removed += 1
+    return removed
+
+
 def _apply_camera_trim(
     seq_dir: Path,
     name: str,
@@ -518,6 +546,10 @@ def _apply_camera_trim(
             f"  Aligned {name}: skipped {start_idx} leading frame(s) "
             f"(~{start_idx / 30:.2f}s)"
         )
+    # Renaming leaves the original tail on disk; remove it so the directory
+    # holds exactly n_new contiguous frames.
+    _delete_frames_from(seq_dir, name, n_new)
+
     if ts is not None:
         np.save(
             str(seq_dir / "rgb" / name / "timestamps.npy"),
@@ -564,13 +596,8 @@ def _trim_cameras_to_episode_end(
             )
             continue
 
+        _delete_frames_from(seq_dir, name, end_idx)
         rgb_dir = seq_dir / "rgb" / name
-        depth_dir = seq_dir / "depth" / name
-        for i in range(end_idx, n_total):
-            for d, ext in ((rgb_dir, _IMG_EXT), (depth_dir, ".npz")):
-                f = d / f"{i:010d}{ext}"
-                if f.exists():
-                    f.unlink()
 
         dropped = n_total - end_idx
         new_ts[name] = ts[:end_idx]

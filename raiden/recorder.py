@@ -113,6 +113,7 @@ class DemonstrationRecorder:
         # Robot data accumulated during one episode
         self._robot_frames: List[Dict] = []
         self._start_time: float = 0.0
+        self._episode_end_ns: Optional[int] = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -126,6 +127,7 @@ class DemonstrationRecorder:
         self.cameras_dir.mkdir(parents=True, exist_ok=True)
 
         self.is_recording = True
+        self._episode_end_ns = None
         self._start_time = time.monotonic()
         self._robot_frames = []
         self._stop_event.clear()
@@ -178,6 +180,23 @@ class DemonstrationRecorder:
         print("  RECORDING STARTED")
         print("!" * 60)
         print("  Press the button again to stop recording\n")
+
+    def mark_episode_end(self) -> None:
+        """Stamp the moment the stop button was pressed.
+
+        Capture keeps running past this point: the verdict prompt sits between
+        the button press and ``stop_recording()``, so the robot loop and camera
+        writers stay live while the user answers it.  Without this mark the
+        episode would end wherever that answer landed, pulling seconds of
+        post-task footage into every recording.
+
+        Deliberately nothing but a clock read — the arms are still under teleop
+        here, and touching threads, cameras or motors at this point is what
+        faulted them previously.  ``time.time_ns()`` is the same clock as both
+        the robot samples and the camera frame timestamps.
+        """
+        if self.is_recording and self._episode_end_ns is None:
+            self._episode_end_ns = time.time_ns()
 
     def stop_recording(self, complete: bool = True) -> Path:
         """Stop the current recording episode and persist data.
@@ -279,6 +298,13 @@ class DemonstrationRecorder:
     def _save_robot_data(self) -> None:
         """Flatten the robot frame list into per-key numpy arrays and save .npz."""
         output_file = self.recording_dir / "robot_data.npz"
+
+        # Discard samples captured during the verdict prompt.
+        if self._episode_end_ns is not None:
+            self._robot_frames = [
+                f for f in self._robot_frames if int(f["t"]) <= self._episode_end_ns
+            ]
+
         n = len(self._robot_frames)
 
         if n == 0:
@@ -376,7 +402,9 @@ class DemonstrationRecorder:
         # shutdown — so the file always overruns this by a few seconds.  The
         # converter uses this value to drop those frames.  (ZED is unaffected:
         # its frames are written by grab(), which stops with the same event.)
-        if self._robot_frames:
+        if self._episode_end_ns is not None:
+            meta_dict["episode_end_ns"] = int(self._episode_end_ns)
+        elif self._robot_frames:
             meta_dict["episode_end_ns"] = int(self._robot_frames[-1]["t"])
 
         rs_offsets = {
@@ -902,6 +930,10 @@ def run_recording(
             finally:
                 if old_settings is not None:
                     termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+            # Stamp the cut now — the verdict prompt below keeps the cameras
+            # and robot loop running while the user answers.
+            recorder.mark_episode_end()
 
             interface.set_active_recording(None)
             estop = robot_controller.session_estop_requested

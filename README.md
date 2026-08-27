@@ -35,7 +35,7 @@ See the **[Installation guide](https://tri-ml.github.io/raiden/guide/installatio
 | `rd console` | Browse and correct demonstration metadata in a terminal UI |
 | `rd convert` | Convert successful recordings to a structured dataset |
 | `rd shardify` | Export converted episodes to WebDataset shards |
-| `rd export_lerobot` | Export raw recordings directly to a LeRobot v3.0 dataset |
+| `rd export_lerobot` | Export raw recordings directly to a LeRobot v3.0 dataset, optionally pushing it to the Hugging Face Hub |
 | `rd visualize` | Visualize a converted recording with Rerun |
 | `rd serve` | Start the policy server for live inference |
 | `rd make_ffs_onnx` | Export Fast Foundation Stereo model to ONNX / TensorRT engines |

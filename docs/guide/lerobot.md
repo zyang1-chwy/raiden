@@ -16,6 +16,9 @@ rd export_lerobot
 An fzf selector lists raw tasks newest first. Each selected task becomes its own
 dataset under `<output-dir>/<task_name>/`.
 
+Add `--upload` to push the result to the Hugging Face Hub as you go — see
+[Uploading to the Hugging Face Hub](#uploading-to-the-hugging-face-hub).
+
 ## Batch and incremental runs
 
 Each selected task is exported as a whole: every recording directory under
@@ -59,6 +62,97 @@ Pass `--reexport` to rebuild a dataset from scratch. It deletes the previous
 A resumed export must keep the schema its first episode established; a recording
 with different cameras or channels is rejected with an explicit error rather than
 silently corrupting the dataset.
+
+## Uploading to the Hugging Face Hub
+
+Pass `--upload` to push each exported task to the Hub as a dataset repo. The
+upload is incremental in the same way the export is: the local directory is
+diffed against what the repo already holds, and only files that are new or have
+changed are committed. Re-running after recording a few more demonstrations
+therefore uploads just those episodes.
+
+```console
+$ rd export_lerobot --task pick_block_red --upload
+  ...
+  ✓ LeRobot v3.0 dataset: data/lerobot/pick_block_red
+
+Pushing to https://huggingface.co/datasets/YzyLmc/pick_block_red (public)
+  token from .env (HF_TOKEN)
+  30 file(s) already on the Hub, unchanged
+  uploading 4 file(s), 41.3 MB, in 1 commit(s)
+✓ pushed 4 file(s) (41.3 MB) to https://huggingface.co/datasets/YzyLmc/pick_block_red
+```
+
+Datasets are created **public** by default — the Hub grants public datasets far
+more storage than private ones, which is what makes the ~1 TB scale Raiden
+targets practical. Use `--hf-private` to opt out. Visibility is only set when
+the repo is created; for an existing repo the exporter says so and leaves it
+alone.
+
+### Uploading without re-exporting
+
+`--upload-only` skips the export entirely and pushes datasets that already exist
+under `--output-dir`. Use it to upload episodes converted before you started
+using `--upload`, to retry an interrupted upload, or once the raw recordings
+have been deleted — nothing under `data/raw/` is consulted.
+
+```bash
+rd export_lerobot --upload-only                          # every dataset under data/lerobot/
+rd export_lerobot --upload-only --task pick_block_red    # just this one
+```
+
+With no `--task`, every directory under `--output-dir` containing
+`meta/info.json` is uploaded. `--output-dir` may also point straight at a single
+dataset.
+
+Because the diff is against the Hub rather than a local record, this is safe to
+run at any time: it uploads exactly what is missing and nothing else.
+
+### The token
+
+Put a write token in a `.env` file at the repo root (already in `.gitignore`),
+so it never lands in your shell history:
+
+```bash
+echo 'HF_TOKEN=hf_xxxxxxxx' >> .env
+```
+
+Create the token at <https://huggingface.co/settings/tokens>. A fine-grained
+token needs **Write access to contents** for the target namespace; a read-only
+one is rejected before anything is uploaded.
+
+The token is looked up in this order, first hit wins:
+
+1. `--hf-token` (discouraged — it lands in your shell history)
+2. `--env-file`, else `./.env`, else `~/.config/raiden/.env`
+3. `$HF_TOKEN`, `$HUGGINGFACE_TOKEN`, `$HUGGING_FACE_HUB_TOKEN`, `$HUGGINGFACEHUB_API_TOKEN`
+4. a token stored by `huggingface-cli login`
+
+### Where it lands
+
+By default each task becomes `<your-hf-username>/<task_name>`. Override with
+`--hf-repo-id`, which accepts either a bare name (your namespace is prepended)
+or a full `owner/name`. Pushing to a namespace the token cannot write to fails
+with the list of namespaces it can.
+
+Because `--hf-repo-id` names one repo, it cannot be combined with a multi-task
+export; either export one task at a time or omit it and let each task get its
+own repo.
+
+A dataset card is generated from `meta/info.json` — episode and frame counts,
+the feature table, and a load snippet — and refreshed on later runs. If you edit
+`README.md` yourself the exporter stops touching it. `--hf-license` sets the
+license in the card's frontmatter.
+
+Payload files are committed before `meta/`, so an interrupted upload never
+leaves a repo advertising episodes whose videos have not landed yet; the next
+run picks up exactly what is missing. Large uploads are split across several
+commits.
+
+The diff compares file sizes, and additionally content-hashes anything under
+8 MB. That catches metadata rewrites that keep the byte count identical —
+`total_frames` going from `1703` to `1704` in `meta/info.json` is the obvious
+case — without spending minutes hashing every video on each run.
 
 ## Relationship to `rd convert`
 
@@ -184,6 +278,16 @@ Readings beyond `--depth-max` (10 m by default) saturate at that value.
 | `--depth-lossless` / `--no-depth-lossless` | on | Lossless depth |
 | `--resize` | native | Resize to `HxW` before encoding |
 | `--max-episodes` | `-1` | Limit episodes exported |
+| `--reexport` | off | Rebuild from scratch instead of appending |
+| `--upload` | off | Push to the Hugging Face Hub after exporting |
+| `--upload-only` | off | Push already-converted datasets; skip exporting |
+| `--hf-repo-id` | `<hf-user>/<task>` | Hub dataset repo |
+| `--hf-private` | off | Create the Hub dataset private instead of public |
+| `--hf-license` | unset | License id written into the dataset card |
+| `--env-file` | `./.env` | File holding `HF_TOKEN` |
+| `--hf-token` | unset | Token on the command line (prefer `.env`) |
+| `--hf-branch` | `main` | Push to a branch other than `main` |
+| `--force-upload` | off | Re-upload every file instead of diffing first |
 
 ### Tuning `--rgb-gop`
 
