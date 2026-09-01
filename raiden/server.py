@@ -38,8 +38,12 @@ point in the intrinsics and the ``T_cam→ee`` rotation are corrected accordingl
 """
 
 import asyncio
+import atexit
 import concurrent.futures
 import json
+import os
+import select
+import sys
 import threading
 import time
 from collections import deque
@@ -101,7 +105,20 @@ _PROPRIO_HISTORY_SIZE = 64
 # abrupt policy jumps while allowing normal motion.
 _DEFAULT_MAX_JOINT_DELTA = 0.2  # radians
 
+# Default rate at which queued policy actions are executed.  This must match the
+# fps of the dataset the policy was trained on: each action was learned as the
+# target reached one dataset frame after the previous one.  Executing slower
+# stretches every motion and, because the arm then travels further between
+# policy calls than it ever did in training, feeds back out-of-distribution
+# states — which shows up as the arm oscillating between two poses.
+# ``rd export_lerobot`` writes 30 fps by default, so a policy trained on raiden
+# recordings normally wants ``--control-hz 30``.
 _CONTROL_HZ = 10.0
+
+# Inner interpolation rate inside one control period.  Substeps are derived from
+# this so raising the control rate does not multiply the rate at which the CAN
+# bus is written: at 10 Hz this reproduces the original fixed 10 substeps.
+_SMOOTH_INNER_HZ = 100.0
 
 # Per-arm Kinematics instances, each protected by its own lock.
 #
@@ -232,7 +249,11 @@ class RaidenPolicyServer(chiral.PolicyServer):
         resize_images_size: Optional[Tuple[int, int]] = None,
         visualize: bool = False,
         arms: str = "bimanual",
+        control_hz: float = _CONTROL_HZ,
     ):
+        if control_hz <= 0:
+            raise ValueError(f"control_hz must be positive, got {control_hz}")
+        self._control_hz = float(control_hz)
         if arms not in ("bimanual", "single"):
             raise ValueError(f"arms must be 'bimanual' or 'single', got {arms!r}")
         self._arms = arms
@@ -410,6 +431,7 @@ class RaidenPolicyServer(chiral.PolicyServer):
         # returns immediately instead of racing with the hold loop.
         print("Initializing footpedal...")
         self._robot.attach_footpedal(callback=self._trigger_estop)
+        self._start_key_estop()
 
         print("\nRaiden policy server ready.")
 
@@ -585,6 +607,73 @@ class RaidenPolicyServer(chiral.PolicyServer):
         """
         self._estop_active.set()
         self._robot.emergency_stop()
+
+    def _start_key_estop(self) -> None:
+        """Arm the ESC key as a software e-stop, mirroring the footpedal.
+
+        Reads stdin from a daemon thread and calls the same ``_trigger_estop``
+        callback the left pedal uses, so there is one e-stop path regardless of
+        which input fired it.  Intended as a stand-in when no footpedal is
+        attached — it depends on this process's terminal, so it is strictly
+        weaker than the pedal and not a substitute for a hardware stop.
+
+        The terminal is put in *cbreak* rather than raw mode so that ISIG stays
+        enabled and Ctrl-C still raises KeyboardInterrupt.  A bare ESC is
+        distinguished from an escape sequence (arrow keys send ``\\x1b[A``) by
+        checking whether more bytes follow immediately; without that, an arrow
+        key would e-stop the robot.
+        """
+        if not sys.stdin.isatty():
+            print("  – stdin is not a terminal; ESC e-stop unavailable")
+            return
+
+        import termios
+        import tty
+
+        fd = sys.stdin.fileno()
+        try:
+            saved = termios.tcgetattr(fd)
+        except termios.error as e:
+            print(f"  – ESC e-stop unavailable: {e}")
+            return
+
+        restored = threading.Event()
+
+        def _restore() -> None:
+            if restored.is_set():
+                return
+            restored.set()
+            try:
+                termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+            except Exception:
+                pass
+
+        atexit.register(_restore)
+
+        def _watch() -> None:
+            try:
+                tty.setcbreak(fd)
+                while self._running:
+                    if not select.select([fd], [], [], 0.2)[0]:
+                        continue
+                    if os.read(fd, 1) != b"\x1b":
+                        continue
+                    # More bytes already waiting → this is an escape sequence
+                    # (arrow/function key), not a deliberate ESC press.
+                    if select.select([fd], [], [], 0.05)[0]:
+                        os.read(fd, 32)  # drain the sequence and ignore it
+                        continue
+                    _restore()
+                    print("\n[ESC] emergency stop requested")
+                    self._trigger_estop()
+                    return
+            except Exception as e:
+                print(f"  – ESC e-stop watcher stopped: {e}")
+            finally:
+                _restore()
+
+        threading.Thread(target=_watch, daemon=True, name="key-estop").start()
+        print("  ✓ ESC key armed as e-stop")
 
     async def _handle(self, websocket) -> None:
         try:
@@ -906,8 +995,8 @@ class RaidenPolicyServer(chiral.PolicyServer):
                 first step — falls back to reading the actual robot position.
             joint_cmd: (14,) float32 — left arm (7) then right arm (7).
         """
-        steps = 10
-        dt = (1.0 / _CONTROL_HZ) / steps
+        steps = max(2, round(_SMOOTH_INNER_HZ / self._control_hz))
+        dt = (1.0 / self._control_hz) / steps
 
         # Read start positions once before the loop.
         if prev_cmd is not None:
@@ -1531,6 +1620,7 @@ def run_server(
     resize_images_size: Optional[Tuple[int, int]] = (480, 640),  # (H, W) — 640 wide by 480 tall
     visualize: bool = False,
     arms: str = "bimanual",
+    control_hz: float = _CONTROL_HZ,
 ) -> None:
     """Start the Raiden chiral policy server."""
     from raiden._config import CALIBRATION_FILE, CAMERA_CONFIG
@@ -1550,6 +1640,7 @@ def run_server(
         resize_images_size=resize_images_size,
         visualize=visualize,
         arms=arms,
+        control_hz=control_hz,
     )
     try:
         server.run()

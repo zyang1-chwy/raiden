@@ -50,6 +50,7 @@ from tqdm import tqdm
 from raiden import converter as _conv
 from raiden._config import CAMERA_CONFIG
 from raiden.camera_config import CameraConfig
+from raiden.utils import demonstration_status
 
 CODEBASE_VERSION = "v3.0"
 
@@ -1568,6 +1569,20 @@ def resolve_raw_recordings(
                     f"no matching episodes in {task_path}: asked for "
                     f"{sorted(wanted)}, available: {have}"
                 )
+
+        # Drop anything not marked successful, matching ``rd convert``.  Without
+        # this a failed or unmarked take would be exported and — with --upload —
+        # published to the Hub as though it were a good demonstration.
+        # "unknown" is kept: recordings predating the status field.
+        keep = []
+        for r in recs:
+            status = demonstration_status(r)
+            if status in ("success", "unknown"):
+                keep.append(r)
+            else:
+                print(f"  Skipping {task_path.name}/{r.name} (status={status})")
+        recs = keep
+
         if recs:
             out.append((task_path, recs))
     return out

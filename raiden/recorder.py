@@ -70,6 +70,15 @@ class RecordingMetadata:
     control: str = "leader"
     complete: bool = False
     converted: bool = False
+    status: str = "pending"
+    """User verdict: "success", "failure", or "pending" if never marked.
+
+    Duplicated from the demonstrations DB on purpose — the DB lives in
+    ~/.config/raiden and does not travel with the data, so a recording copied
+    to another machine would otherwise lose its label and read as successful.
+    Distinct from ``complete``, which only says the recording loop exited
+    cleanly.
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -198,7 +207,7 @@ class DemonstrationRecorder:
         if self.is_recording and self._episode_end_ns is None:
             self._episode_end_ns = time.time_ns()
 
-    def stop_recording(self, complete: bool = True) -> Path:
+    def stop_recording(self, complete: bool = True, status: str = "pending") -> Path:
         """Stop the current recording episode and persist data.
 
         Stops camera recording and then shuts down the robot controller
@@ -211,6 +220,9 @@ class DemonstrationRecorder:
             complete: Set to True when the episode was cleanly stopped by the
                       user.  Set to False on crash / Ctrl-C so the directory
                       can be detected as incomplete and overridden next run.
+            status:   The user's verdict — "success", "failure", or "pending"
+                      when unmarked — written into metadata.json so the label
+                      travels with the recording.
         """
         if not self.is_recording:
             return self.recording_dir
@@ -247,7 +259,7 @@ class DemonstrationRecorder:
 
         # Persist robot data
         self._save_robot_data()
-        self._save_metadata(duration, complete=complete)
+        self._save_metadata(duration, complete=complete, status=status)
 
         return self.recording_dir
 
@@ -368,7 +380,9 @@ class DemonstrationRecorder:
         np.savez_compressed(output_file, **data)
         print(f"  ✓ Robot data saved  ({n} frames) → {output_file}")
 
-    def _save_metadata(self, duration: float, complete: bool = True) -> None:
+    def _save_metadata(
+        self, duration: float, complete: bool = True, status: str = "pending"
+    ) -> None:
         output_file = self.recording_dir / "metadata.json"
         n = len(self._robot_frames)
         hz = n / duration if duration > 0 else 0.0
@@ -385,6 +399,7 @@ class DemonstrationRecorder:
             control=self.interface.name,
             complete=complete,
             converted=False,
+            status=status,
         )
 
         meta_dict = asdict(meta)
@@ -548,7 +563,11 @@ def _next_recording_dir(task_dir: Path) -> Path:
 
     If the last episode directory has no metadata or ``complete=False``, it is
     treated as an incomplete recording, wiped, and reused.  Otherwise a new
-    numbered directory is created.
+    directory numbered one past the highest existing index is created.
+
+    The index comes from the highest name rather than the directory count, so
+    that gaps — left by discarded skips or by hand-deleted episodes — cannot
+    make this hand back a number that is already taken.
     """
     existing = sorted(d for d in task_dir.iterdir() if d.is_dir() and d.name.isdigit())
 
@@ -567,8 +586,8 @@ def _next_recording_dir(task_dir: Path) -> Path:
             last_dir.mkdir()
             return last_dir
 
-    episode_idx = f"{len(existing):04d}"
-    new_dir = task_dir / episode_idx
+    next_idx = max((int(d.name) for d in existing), default=-1) + 1
+    new_dir = task_dir / f"{next_idx:04d}"
     new_dir.mkdir()
     return new_dir
 
@@ -644,7 +663,7 @@ def _wait_for_verdict(
       - Leader arm bottom button→ "failure"  (non-spacemouse)
       - Enter key               → "success"
       - 'f' key                 → "failure"
-      - Any other key / timeout → None (leaves status as "pending")
+      - Any other key / timeout → None (episode is discarded by the caller)
 
     Returns:
         "success", "failure", or None.
@@ -660,7 +679,8 @@ def _wait_for_verdict(
     lines += ["    Middle pedal → success", "    Right pedal  → failure"]
     if interface.supports_verdict_button:
         lines += ["    Top button    → success", "    Bottom button → failure"]
-    lines += ["    Enter → success   f → failure   other key → skip"]
+    lines += ["    Enter → success   f → failure   other key → discard"]
+    lines += ["    (unmarked demos are deleted, including on the 30 s timeout)"]
     print("\n".join(lines))
     print("-" * 60 + "\n")
 
@@ -749,6 +769,9 @@ def run_recording(
       Press the leader button to start the next episode, or 'q' to end the session.
     - Incomplete recordings (estop / Ctrl-C) are detected via the ``complete``
       flag in metadata.json and overridden on the next run.
+    - Episodes left unmarked at the verdict prompt are deleted immediately;
+      success and failure verdicts are kept and written to both metadata.json
+      and the demonstrations DB.
     """
     print("\n" + "=" * 60)
     print("  DEMONSTRATION RECORDING")
@@ -947,10 +970,25 @@ def run_recording(
                 verdict = _wait_for_verdict(robot_controller, interface)
 
             # ── stop episode (shuts down robots, keeps cameras open) ──────
-            saved_dir = recorder.stop_recording(complete=not estop)
+            saved_dir = recorder.stop_recording(
+                complete=not estop,
+                status=verdict if verdict is not None else "pending",
+            )
             recorder = None
             _active_ctrl[0] = None
             robot_controller = None  # shut down inside stop_recording
+
+            # ── skipped demo → discard ───────────────────────────────────
+            # An unmarked episode is one the operator declined to keep, so the
+            # footage is dropped instead of accumulating unlabelled (tens of
+            # GB per session).  No DB row is written either: it would point at
+            # a path that no longer exists, and the next episode reuses that
+            # same directory number.  Failures are kept — they are labelled,
+            # and negative demonstrations are still worth having.
+            if not estop and verdict is None:
+                shutil.rmtree(saved_dir, ignore_errors=True)
+                print(f"\n  Skipped — discarded {saved_dir}\n")
+                continue
 
             _copy_calibration(saved_dir)
 
@@ -978,10 +1016,9 @@ def run_recording(
                     camera_config_id=camera_config_id,
                     calibration_result_id=calibration_result_id,
                 )
-                status = verdict if verdict is not None else "pending"
-                db.update_demonstration(demo_id, status=status, converted=False)
-                if verdict:
-                    print(f"  Demonstration marked as: {verdict}")
+                # Unmarked episodes never reach here — they are discarded above.
+                db.update_demonstration(demo_id, status=verdict, converted=False)
+                print(f"  Demonstration marked as: {verdict}")
 
             print(f"✓ Recording saved to: {saved_dir}\n")
             # Loop back — cameras stay open, robots reinited next iteration.

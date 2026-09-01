@@ -1,5 +1,6 @@
 """Shared utilities for Raiden CLI."""
 
+import json
 import sys
 from pathlib import Path
 from typing import List, Optional
@@ -109,3 +110,45 @@ def select_processed_recording(data_dir: str = "data/processed") -> Optional[Pat
     if not selected:
         return None
     return episodes[selected[0]]
+
+
+def demonstration_status(rec_dir: Path) -> str:
+    """Return the verdict for a raw recording: success / failure / pending / unknown.
+
+    ``metadata.json`` is the authority because it travels with the data.  The
+    demonstrations DB is only a fallback, for recordings made before the status
+    field was written into metadata; it is keyed by the exact path string that
+    was current at record time, so both the given path and its
+    relative-to-cwd form are tried.
+
+    Returns ``"unknown"`` when neither source has a verdict, which callers
+    should treat as "keep" so that pre-DB recordings are not silently dropped.
+    """
+    meta_file = rec_dir / "metadata.json"
+    if meta_file.exists():
+        try:
+            with open(meta_file) as f:
+                status = json.load(f).get("status")
+            if status:
+                return str(status)
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    candidates = [str(rec_dir)]
+    try:
+        candidates.append(str(rec_dir.resolve().relative_to(Path.cwd())))
+    except ValueError:
+        pass
+
+    try:
+        from raiden.db.database import get_db
+
+        db = get_db()
+        for path_str in candidates:
+            demo = db.get_demonstration_by_raw_path(path_str)
+            if demo is not None:
+                return str(demo.get("status") or "pending")
+    except Exception:
+        pass
+
+    return "unknown"

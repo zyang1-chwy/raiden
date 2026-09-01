@@ -53,6 +53,7 @@ from tqdm import tqdm
 
 from raiden._config import CAMERA_CONFIG
 from raiden.camera_config import CameraConfig
+from raiden.utils import demonstration_status
 
 _SEQUENCE_NAME = "0000"
 _IMG_EXT = ".png"
@@ -1393,13 +1394,13 @@ def convert_task(
     success_dirs = []
     skipped = 0
     for rec_dir in recording_dirs:
-        status = "unknown"
+        # metadata.json first, DB second — see utils.demonstration_status.
+        status = demonstration_status(rec_dir)
         already_converted = False
         if _db is not None:
             try:
                 demo = _db.get_demonstration_by_raw_path(str(rec_dir))
                 if demo is not None:
-                    status = demo.get("status", "pending")
                     already_converted = bool(demo.get("converted", False))
             except Exception:
                 pass

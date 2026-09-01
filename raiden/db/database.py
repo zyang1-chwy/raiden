@@ -256,11 +256,29 @@ class RaidenDB:
             ]
 
     def get_demonstration_by_raw_path(self, raw_data_path: str) -> Optional[Dict]:
+        """Return the most recently created demonstration at *raw_data_path*.
+
+        Episode directories are reused after an e-stop (see
+        ``recorder._next_recording_dir``), so several rows can share one path.
+        Only the newest describes the data currently on disk; the earlier rows
+        belong to takes that have since been overwritten.  Returning the first
+        match instead would report a stale verdict and, for example, skip a
+        successful demonstration at conversion time.
+        """
         with self._lock():
-            for d in self.demonstrations.getAll():
-                if d.get("raw_data_path") == raw_data_path:
-                    return d
-            return None
+            matches = [
+                d
+                for d in self.demonstrations.getAll()
+                if d.get("raw_data_path") == raw_data_path
+            ]
+            if not matches:
+                return None
+            # Index breaks ties so that equal timestamps resolve to insertion
+            # order, which is also newest-last.
+            return max(
+                enumerate(matches),
+                key=lambda pair: (pair[1].get("created_at") or "", pair[0]),
+            )[1]
 
     def get_demonstration_by_id(self, demo_id: int) -> Optional[Dict]:
         with self._lock():

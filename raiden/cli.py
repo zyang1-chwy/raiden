@@ -472,6 +472,11 @@ class ServeCommand:
     arms: Literal["bimanual", "single"] = "bimanual"
     """Which follower arms to drive: both (bimanual) or left arm only (single)"""
 
+    control_hz: float = 10.0
+    """Rate at which policy actions are executed. Must match the fps of the dataset the
+    policy was trained on — rd export_lerobot writes 30 fps, so trained policies normally
+    want 30. Executing slower stretches motion and feeds back out-of-distribution states"""
+
     no_depth: bool = False
     """Disable depth sensing on ZED cameras (faster, no NEURAL_LIGHT inference)"""
 
@@ -943,6 +948,7 @@ def main():
                 resize_images_size=resize,
                 visualize=command.visualize,
                 arms=command.arms,
+                control_hz=command.control_hz,
             )
 
         elif subcommand == "make_ffs_onnx":
