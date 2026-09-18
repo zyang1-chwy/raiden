@@ -64,6 +64,7 @@ nav:
     - "10. Evaluation": guide/serve.md
     - "11. Replay": guide/replay.md
     - "12. Visualization": guide/visualization.md
+    - Fine-tuning a VLA: guide/finetuning.md
     - Safety: guide/safety.md
     - FAQ: guide/faq.md
   - API Reference:
